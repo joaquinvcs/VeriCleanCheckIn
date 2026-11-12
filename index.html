@@ -98,6 +98,16 @@ footer{color:var(--muted);font-size:12px;padding-block:0 32px}
   thead{display:none} table,tbody,tr,td{display:block} tr{border-bottom:1px solid var(--rule);padding:8px 0;border-left:3px solid var(--tc,transparent)}
   td{border:0;padding:1px 14px} td.who{border:0;font-size:14.5px}
 }
+
+/* day switch + supervisor filter */
+.daybar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;padding:16px 0 0}
+.seg{display:inline-flex;background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:3px;gap:3px}
+.seg button{border:0;background:none;color:var(--muted);font:600 14px var(--display);letter-spacing:.2px;padding:8px 14px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.seg button[aria-pressed=true]{background:var(--navy);color:#fff}
+@media (prefers-color-scheme: dark){.seg button[aria-pressed=true]{background:var(--accent)}}
+.daynote{font-size:13px;color:var(--muted)}
+.scope{padding:10px 0 0}
+#f-sup-wrap[hidden]{display:none}
 </style>
 </head>
 <body>
@@ -108,10 +118,18 @@ footer{color:var(--muted);font-size:12px;padding-block:0 32px}
 <main class="wrap">
   <div class="msg" id="msg">Loading the latest check-ins…</div>
   <div id="app" hidden>
+  <div class="daybar">
+    <div class="seg" role="group" aria-label="Day">
+      <button type="button" id="d-0" data-day="0" aria-pressed="true">Today</button>
+      <button type="button" id="d-1" data-day="1" aria-pressed="false">Yesterday</button>
+    </div>
+    <span class="daynote" id="daynote"></span>
+  </div>
   <div class="scope" id="scope" hidden></div>
   <section class="tiles" id="tiles" aria-label="Summary"></section>
-  <section class="bld" id="bld" aria-label="Buildings today"></section>
+  <section class="bld" id="bld" aria-label="Buildings"></section>
   <div class="filters">
+    <span id="f-sup-wrap" hidden><label for="f-sup">Supervisor</label> <select id="f-sup"></select></span>
     <label for="f-group" id="f-label">Account</label>
     <select id="f-group"></select>
     <input type="search" id="f-q" placeholder="Search a cleaner or location" aria-label="Search a cleaner or location">
@@ -122,8 +140,7 @@ footer{color:var(--muted);font-size:12px;padding-block:0 32px}
       <h2 id="g-h"><span id="g-title">By account</span><small>tap to filter</small></h2>
       <div class="legend">
         <span><i style="background:var(--green)"></i>Done (in + out)</span>
-        <span><i style="background:var(--blue)"></i>On site now</span>
-        <span><i style="background:var(--amber)"></i>Missed check-out</span>
+        <span><i style="background:var(--blue)"></i>Checked in, not out yet</span>
         <span><i style="background:var(--red)"></i>No-show</span>
         <span><i style="background:var(--gray)"></i>Not started</span>
       </div>
@@ -140,15 +157,15 @@ footer{color:var(--muted);font-size:12px;padding-block:0 32px}
 </main>
 <script>
 var DATA = null;
-var STATE = {tab:"ns", group:"", q:"", all:false};
+var STATE = {day:0, tab:"ns", group:"", sup:"", q:"", all:false};
 var TABS = [
   {k:"ns",   key:"noshow",   label:"No-shows",          cls:"k-ns",   desc:"Scheduled, but never checked in.", cols:["Cleaner","Location","Scheduled"]},
   {k:"done", key:"done",     label:"Full in + out",     cls:"k-done", desc:"Checked in and checked out correctly on every scheduled shift.", cols:["Cleaner","Location","Hours worked"]},
-  {k:"on",   key:"onsite",  label:"On site now",       cls:"k-on",   desc:"Checked in and still on the clock, including people clocked in without a matching shift on the schedule.", cols:["Cleaner","Location","Checked in"]},
+  {k:"on",   key:"onsite",   label:"On site now",       cls:"k-on",   desc:"Checked in and still on the clock, including people clocked in without a matching shift on the schedule.", cols:["Cleaner","Location","Checked in"]},
   {k:"miss", key:"forgot",   label:"Missed check-out",  cls:"k-miss", desc:"Checked in, but never checked out. The app closed the shift on its own.", cols:["Cleaner","Location","Checked in"]},
   {k:"late", key:"late",     label:"Late",              cls:"k-late", desc:"Checked in after the scheduled start.", cols:["Cleaner","Location","Minutes late"]},
-  {k:"hrs",  key:"hours",    label:"Hours",             cls:"k-hrs",  desc:"Time on the clock in the last 24 hours, and for the week so far (Monday to now). Over 40 hours this week is overtime. More than 12 hours in a row usually means a missed check-out.", cols:["Cleaner","Last 24 hours","This week"]},
-  {k:"up",   key:"upcoming", label:"Starting soon",     cls:"k-up",   desc:"Shifts starting in the next 4 hours that have not begun.", cols:["Cleaner","Location","Scheduled"]}
+  {k:"hrs",  key:"hours",    label:"Hours",             cls:"k-hrs",  desc:"Time on the clock in the last 24 hours, and for the week so far (Monday to now). Over 40 hours this week is overtime. More than 12 hours in a row usually means a missed check-out. This tab does not change with the day switch.", cols:["Cleaner","Last 24 hours","This week"]},
+  {k:"up",   key:"upcoming", label:"Later today",       cls:"k-up",   desc:"Shifts later today that have not started yet.", cols:["Cleaner","Location","Scheduled"]}
 ];
 var LIMIT = 40;
 
@@ -162,9 +179,16 @@ function tsOf(s){var m=String(s||"").match(/(\w{3}) (\d+), (\d+):(\d+) (AM|PM)/)
 function worked(a,b){var x=tsOf(a), y=tsOf(b); if(x==null||y==null) return null; var d=(y-x)/3600000; if(d<0) d+=24; return d;}
 function hrs(h){h=+h||0; var H=Math.floor(h), M=Math.round((h-H)*60); if(M===60){H++;M=0;} return H+" h "+(M<10?"0":"")+M+" m";}
 
+// ---- filters: day, account/state, supervisor, search
+function D(){return DATA.days[STATE.day] || DATA.days[0];}
+var SUPSET = null;
+function setSup(){ SUPSET = null; if (STATE.sup && DATA.sup[STATE.sup]){ SUPSET = {}; DATA.sup[STATE.sup].forEach(function(n){SUPSET[n]=1;}); } }
+function keepP(name){ return !SUPSET || SUPSET[name]; }
+function keep(name, group){ return (!STATE.group || group===STATE.group) && keepP(name); }
+
 // One row per cleaner: merge the extra sites a person had in the same check.
 function merged(key){
-  var rows = DATA[key] || [], out = [], idx = {};
+  var rows = (key==="hours" ? DATA.hours : D()[key]) || [], out = [], idx = {};
   if (key === "hours") return rows.map(function(r){return {name:r[0], group:r[1], site:"", h:r[2], wk:r[3], on:r[4], n:r[5]};});
   rows.forEach(function(r){
     var site = String(r[2]||""), extra = 0, m = site.match(/^(.*?)\s+\+(\d+) more$/);
@@ -179,84 +203,116 @@ function merged(key){
 function filtered(key){
   var q = STATE.q.toLowerCase();
   return merged(key).filter(function(r){
-    return (!STATE.group || r.group===STATE.group) &&
-           (!q || (r.name+" "+r.site).toLowerCase().indexOf(q) >= 0);
+    return keep(r.name, r.group) && (!q || (r.name+" "+r.site).toLowerCase().indexOf(q) >= 0);
   });
 }
-function countBy(key){var c={}; merged(key).forEach(function(r){c[r.group]=(c[r.group]||0)+1;}); return c;}
+// people rows: [name, group, checkedIn, fullInOut, noShow, openOrAuto, notStartedYet]
+function roll(people){
+  var pp = {}, names = [];
+  people.forEach(function(p){
+    var q = pp[p[0]]; if (!q){ q = pp[p[0]] = {i:0, n:0, f:1, o:0, u:1}; names.push(p[0]); }
+    q.i |= p[2]; q.n |= p[4]; if (p[2] && !p[3]) q.f = 0; q.o |= p[5]; q.u &= p[6];
+  });
+  var t = {sched:0, "in":0, full:0, ns:0, open:0, later:0};
+  names.forEach(function(n){ var q = pp[n]; t.sched++; if (q.i) t["in"]++; if (q.i && q.f) t.full++; if (q.n && !q.i) t.ns++; if (q.o) t.open++; if (q.u) t.later++; });
+  return t;
+}
+function uniq(key){ var s = {}; (D()[key]||[]).forEach(function(r){ if (keep(r[0], r[1])) s[r[0]] = 1; }); return Object.keys(s).length; }
+function cur(){
+  var t = roll(D().people.filter(function(p){ return keep(p[0], p[1]); }));
+  t.onsite = uniq("onsite"); t.forgot = uniq("forgot");
+  var B = 0, st = 0, dn = 0;
+  D().bld.forEach(function(b){
+    if (STATE.group && b[1] !== STATE.group) return;
+    if (SUPSET && !b[4].some(function(n){ return SUPSET[n]; })) return;
+    B++; st += b[2]; dn += b[3];
+  });
+  t.bld = B; t.bld_started = st; t.bld_done = dn;
+  return t;
+}
+function groupsNow(){
+  var by = {}, order = [];
+  D().people.forEach(function(p){ if (!keepP(p[0])) return; if (!by[p[1]]){ by[p[1]] = []; order.push(p[1]); } by[p[1]].push(p); });
+  return order.map(function(g){ var t = roll(by[g]); t.g = g; return t; })
+              .sort(function(a,b){ return b.sched - a.sched || (a.g < b.g ? -1 : 1); });
+}
+function allGroups(){
+  var s = {};
+  DATA.days.forEach(function(d){ d.people.forEach(function(p){ s[p[1]] = 1; }); d.bld.forEach(function(b){ s[b[1]] = 1; }); });
+  return Object.keys(s).sort();
+}
 
+// ---- render
 function renderHeader(){
   document.title = DATA.title;
   el("title").textContent = DATA.title;
-  el("window").textContent = DATA.window.replace("Shifts starting","Shifts starting between") + "  ·  Central Time";
+  el("window").textContent = D().window + "  ·  Central Time";
   var mins = Math.max(0, Math.round((Date.now()/1000 - DATA.gen_ts)/60));
   var ago = mins < 1 ? "just now" : mins < 60 ? mins+" min ago" : Math.floor(mins/60)+" h "+(mins%60)+" min ago";
   el("freshtxt").textContent = "Updated " + DATA.generated.replace(/^\w+ \w+ \d+, /,"") + "  ·  " + ago;
   el("fresh").classList.toggle("stale", mins > 90);
   el("fresh").title = mins > 90 ? "The next update is overdue." : "Refreshes every hour.";
 }
-// Summary numbers for everyone, or for the account / state picked in the filter.
-function cur(){
-  var t = DATA.tot; if (!STATE.group) return t;
-  var g = DATA.groups.filter(function(x){return x.g===STATE.group;})[0] || {sched:0,in:0,full:0,ns:0,open:0,up:0};
-  function uniq(k){var s={}; (DATA[k]||[]).forEach(function(r){ if (r[1]===STATE.group) s[r[0]]=1; }); return Object.keys(s).length;}
-  var b = DATA.bld_by ? (DATA.bld_by[STATE.group] || [0,0,0]) : null;
-  return {sched:g.sched, "in":g["in"], full:g.full, ns:g.ns, onsite:uniq("onsite"), forgot:uniq("forgot"), upcoming:g.up,
-          day:t.day, bld_sched:b ? b[0] : null, bld_started:b ? b[1] : 0, bld_done:b ? b[2] : 0};
+function renderDay(){
+  DATA.days.forEach(function(d, i){
+    var b = el("d-"+i); if (!b) return;
+    b.textContent = (i === 0 ? "Today" : "Yesterday") + " · " + d.label;
+    b.setAttribute("aria-pressed", String(STATE.day === i));
+  });
+  el("daynote").textContent = STATE.day === 0 ? "A day runs 4 AM to 4 AM, so night shifts count on the day they start."
+                                              : "Final results for yesterday's shifts, including last night.";
 }
 function renderTiles(){
-  var t = cur(), S = t.sched;
-  el("scope").hidden = !STATE.group;
-  el("scope").innerHTML = STATE.group ? 'Showing <b>'+esc(STATE.group)+'</b> only<button type="button" class="clear" id="scope-clear">Show all</button>' : "";
+  var t = cur(), S = t.sched, today = STATE.day === 0, bits = [];
+  if (STATE.sup) bits.push('supervisor <b>'+esc(STATE.sup)+'</b>');
+  if (STATE.group) bits.push('<b>'+esc(STATE.group)+'</b>');
+  el("scope").hidden = !bits.length;
+  el("scope").innerHTML = bits.length ? 'Showing '+bits.join(' · ')+' only<button type="button" class="clear" id="scope-clear">Show all</button>' : "";
   var tiles = [
-    ["t-sched","Scheduled", t.sched, "", (t.upcoming? t.upcoming+" more starting soon" : "cleaners with a shift")],
-    ["t-in","Checked in", t.in, pct(t.in,S), "of scheduled"],
+    ["t-sched","Scheduled", S, "", today && t.later ? t.later+" not started yet" : "cleaners with a shift"],
+    ["t-in","Checked in", t["in"], pct(t["in"],S), "of scheduled"],
     ["t-full","Done (in + out)", t.full, pct(t.full,S), "of scheduled"],
-    ["t-on","On site now", t.onsite, "", "on the clock right now"],
-    ["t-ns","No-show", t.ns, pct(t.ns,S), "of scheduled"],
+    ["t-on","On site now", t.onsite, "", today ? "on the clock right now" : "still clocked in from yesterday"],
+    ["t-ns","No-show", t.ns, pct(t.ns,S), today ? "of scheduled, so far" : "of scheduled"],
     ["t-miss","Missed check-out", t.forgot, pct(t.forgot,S), "of scheduled"]
   ];
   el("tiles").innerHTML = tiles.map(function(x){
     return '<div class="tile '+x[0]+'"><span class="lab">'+x[1]+'</span><span class="num">'+x[2].toLocaleString()+'</span>'+
       '<span class="pct">'+(x[3]||"&nbsp;")+'</span><span class="note">'+x[4]+'</span></div>';
   }).join("");
-}
-function renderBld(){
-  var t = cur(), B = t.bld_sched;
-  if (B == null){el("bld").hidden = true; return;}
-  var miss = Math.max(0, (t.bld_started||0) - (t.bld_done||0)), later = Math.max(0, B - (t.bld_started||0));
-  el("bld").hidden = false;
-  el("bld").innerHTML = '<span class="day">'+esc(t.day)+' · buildings today'+(STATE.group?' · '+esc(STATE.group):'')+'</span>'+
+  var B = t.bld, miss = Math.max(0, t.bld_started - t.bld_done), later = Math.max(0, B - t.bld_started);
+  el("bld").innerHTML = '<span class="day">'+esc(D().day)+' · buildings</span>'+
     '<span><b>'+B+'</b>scheduled</span>'+
-    '<span><b style="color:var(--green)">'+(t.bld_done||0)+'</b>checked in ('+pct(t.bld_done||0,B)+')</span>'+
-    '<span><b style="color:var(--red)">'+miss+'</b>shift started, no check-in yet</span>'+
-    '<span><b>'+later+'</b>later today</span>';
+    '<span><b style="color:var(--green)">'+t.bld_done+'</b>checked in ('+pct(t.bld_done,B)+')</span>'+
+    '<span><b style="color:var(--red)">'+miss+'</b>'+(today ? 'shift started, no check-in yet' : 'no check-in')+'</span>'+
+    (today ? '<span><b>'+later+'</b>later today</span>' : '');
 }
 function renderFilters(){
-  var unit = DATA.unit, sel = el("f-group");
+  var unit = DATA.unit, sel = el("f-group"), gs = allGroups();
+  if (STATE.group && gs.indexOf(STATE.group) < 0) gs.unshift(STATE.group);
   el("f-label").textContent = unit;
   el("g-title").textContent = "By " + unit.toLowerCase();
-  var gs = DATA.groups.map(function(g){return g.g;});
   sel.innerHTML = '<option value="">All '+(unit==="State"?"states":"accounts")+'</option>' +
     gs.map(function(g){return '<option'+(g===STATE.group?' selected':'')+'>'+esc(g)+'</option>';}).join("");
-  el("f-clear").hidden = !(STATE.group || STATE.q);
+  var sups = Object.keys(DATA.sup || {}).sort();
+  el("f-sup-wrap").hidden = !sups.length;
+  el("f-sup").innerHTML = '<option value="">All supervisors</option>' +
+    sups.map(function(s){return '<option value="'+esc(s)+'"'+(s===STATE.sup?' selected':'')+'>'+esc(s)+' ('+DATA.sup[s].length+')</option>';}).join("");
+  el("f-clear").hidden = !(STATE.group || STATE.q || STATE.sup);
 }
 function renderGroups(){
-  var on = countBy("onsite"), miss = countBy("forgot");
-  el("groups").innerHTML = DATA.groups.map(function(g){
-    var total = g.sched + g.up || 1, o = Math.min(on[g.g]||0, g.open), m = Math.max(0, g.open - o),
-        other = Math.max(0, g.in - g.full - g.open);
-    var seg = [[g.full+other,"var(--green)"],[o,"var(--blue)"],[m,"var(--amber)"],[g.ns,"var(--red)"],[g.up,"var(--gray)"]];
+  el("groups").innerHTML = groupsNow().map(function(g){
+    var total = g.sched || 1, open = Math.max(0, g["in"] - g.full);
+    var seg = [[g.full,"var(--green)"],[open,"var(--blue)"],[g.ns,"var(--red)"],[g.later,"var(--gray)"]];
     var flags = [];
     if (g.ns) flags.push('<span class="pill p-ns">'+g.ns+' no-show</span>');
-    if (o) flags.push('<span class="pill p-on">'+o+' on site</span>');
-    if (m) flags.push('<span class="pill p-miss">'+m+' missed check-out</span>');
-    if (g.up) flags.push('<span class="pill p-up">'+g.up+' starting soon</span>');
+    if (open) flags.push('<span class="pill p-on">'+open+' not checked out yet</span>');
+    if (g.later) flags.push('<span class="pill p-up">'+g.later+' not started</span>');
     return '<button type="button" class="acct'+(g.g===STATE.group?' sel':'')+'" data-g="'+esc(g.g)+'">'+
-      '<span class="name">'+esc(g.g)+'</span><span class="cnt"><b>'+(g.full)+'</b> of '+g.sched+' done · '+pct(g.full,g.sched)+'</span>'+
+      '<span class="name">'+esc(g.g)+'</span><span class="cnt"><b>'+g.full+'</b> of '+g.sched+' done · '+pct(g.full,g.sched)+'</span>'+
       '<span class="bar" aria-hidden="true">'+seg.map(function(s){return s[0]?'<span style="width:'+(100*s[0]/total)+'%;background:'+s[1]+'"></span>':'';}).join("")+'</span>'+
       (flags.length?'<span class="flags">'+flags.join("")+'</span>':'')+'</button>';
-  }).join("") || '<div class="empty">Nobody scheduled in this window.</div>';
+  }).join("") || '<div class="empty">Nobody scheduled for this day.</div>';
 }
 function renderTabs(){
   el("tabs").innerHTML = TABS.map(function(t){
@@ -270,7 +326,7 @@ function renderList(){
   if (T.k==="done" && rows.length){var tot=0, ppl={}; rows.forEach(function(r){var w=worked(r.t,r.x); if(w!=null) tot+=w; ppl[r.name]=1;});
     dtxt += " Total: "+hrs(tot)+" worked by "+Object.keys(ppl).length+" cleaners.";}
   el("desc").textContent = dtxt;
-  if (!rows.length){el("list").innerHTML = '<div class="empty">'+(STATE.group||STATE.q?"No one matches these filters.":"No one in this list right now.")+'</div>'; return;}
+  if (!rows.length){el("list").innerHTML = '<div class="empty">'+(STATE.group||STATE.q||STATE.sup?"No one matches these filters.":"No one in this list.")+'</div>'; return;}
   var shown = STATE.all ? rows : rows.slice(0, LIMIT), tc = getComputedStyle(document.querySelector(".tab."+T.cls)).getPropertyValue("--tc");
   var html = '<table><thead><tr><th>'+T.cols[0]+'</th><th>'+T.cols[1]+'</th><th>'+T.cols[2]+'</th></tr></thead><tbody>' +
     shown.map(function(r){
@@ -294,39 +350,50 @@ function renderList(){
   el("list").innerHTML = html;
 }
 function renderFoot(){
-  var t = DATA.tot;
-  el("foot").textContent = t.locations+" locations in the account (scheduled in the last 4 weeks)  ·  "+t.sched+" of "+t.cleaners+
-    " cleaners scheduled  ·  Source: Connecteam, refreshed every hour  ·  Percentages are of scheduled cleaners.";
+  el("foot").textContent = DATA.locations+" locations in the account (scheduled in the last 4 weeks)  ·  "+DATA.cleaners+
+    " cleaners  ·  Supervisor lists come from the Connecteam smart groups named \"SV - <supervisor name>\"  ·  Source: Connecteam, refreshed every hour  ·  Percentages are of scheduled cleaners.";
 }
 function render(){
   el("msg").hidden = true; el("app").hidden = false;
-  renderHeader(); renderTiles(); renderBld(); renderFilters(); renderGroups(); renderTabs(); renderList(); renderFoot();
+  setSup();
+  renderHeader(); renderDay(); renderTiles(); renderFilters(); renderGroups(); renderTabs(); renderList(); renderFoot();
 }
 
 document.addEventListener("click", function(e){
   if (!DATA) return;
-  var a = e.target.closest(".acct"), t = e.target.closest(".tab");
+  var a = e.target.closest(".acct"), t = e.target.closest(".tab"), d = e.target.closest("[data-day]");
+  if (d){STATE.day = +d.dataset.day; STATE.all=false; if (STATE.day && STATE.tab==="up") STATE.tab="ns"; render(); return;}
   if (a){STATE.group = STATE.group===a.dataset.g ? "" : a.dataset.g; STATE.all=false; render(); return;}
   if (t){STATE.tab = t.dataset.k; STATE.all=false; renderTabs(); renderList(); return;}
   if (e.target.id==="showall"){STATE.all=true; renderList(); return;}
-  if (e.target.id==="f-clear" || e.target.id==="scope-clear"){STATE.group=""; STATE.q=""; el("f-q").value=""; render();}
+  if (e.target.id==="f-clear" || e.target.id==="scope-clear"){STATE.group=""; STATE.sup=""; STATE.q=""; el("f-q").value=""; render();}
 });
 el("f-group").addEventListener("change", function(){STATE.group=this.value; STATE.all=false; render();});
+el("f-sup").addEventListener("change", function(){STATE.sup=this.value; STATE.all=false; remember(); render();});
 el("f-q").addEventListener("input", function(){STATE.q=this.value.trim(); STATE.all=false; renderFilters(); renderTabs(); renderList();});
+// Each phone remembers the supervisor it last picked.
+function remember(){ try { localStorage.setItem("vc-sup", STATE.sup); } catch(e){} }
+try { STATE.sup = localStorage.getItem("vc-sup") || ""; } catch(e){}
 
-// The tracker key travels in the link after "#k=", so it never reaches this site's server and is not in the page code.
+function ok(d){ return d && d.v === 2 && d.days && d.days.length; }
+function take(d){ DATA = d; if (STATE.sup && !(DATA.sup||{})[STATE.sup]) STATE.sup = ""; render(); }
+function showMsg(t){ el("msg").textContent = t; el("msg").hidden = false; el("app").hidden = true; el("freshtxt").textContent = "Not loaded"; el("fresh").classList.add("stale"); }
+// Two ways in: the link carries the tracker key after "#k=" (the GitHub page), or the data comes inline (the Google page).
 var KEY = (location.hash.match(/[#&]k=([\w-]+)/) || [])[1];
 var SRC = KEY ? "https://script.google.com/macros/s/" + KEY + "/exec?format=json" : null;
-function showMsg(t){ el("msg").textContent = t; el("msg").hidden = false; el("app").hidden = true; el("freshtxt").textContent = "Not loaded"; el("fresh").classList.add("stale"); }
 function load(){
-  if (!SRC){ showMsg("This link is incomplete. Ask VeriClean for the full tracker link."); return; }
-  fetch(SRC + "&t=" + Date.now(), {credentials: "omit", cache: "no-store"})
-    .then(function(r){ if (!r.ok) throw new Error(r.status); return r.json(); })
-    .then(function(d){ if (!d || !d.tot) throw new Error("empty"); DATA = d; render(); })
-    .catch(function(){ if (DATA) renderHeader(); else showMsg("Could not load the tracker right now. Check the connection and pull down to reload."); });
+  if (SRC){
+    fetch(SRC + "&t=" + Date.now(), {credentials: "omit", cache: "no-store"})
+      .then(function(r){ if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function(d){ if (!ok(d)) throw new Error("old"); take(d); })
+      .catch(function(){ if (DATA) renderHeader(); else showMsg("Could not load the tracker right now. Check the connection and pull down to reload."); });
+  } else if (window.google && google.script && google.script.run){
+    google.script.run.withSuccessHandler(function(d){ if (ok(d)) take(d); }).getData();
+  } else if (!DATA){
+    showMsg("This link is incomplete. Ask VeriClean for the full tracker link.");
+  }
 }
-load();
-// Keep the open page current: re-read the latest snapshot every 5 minutes, and when the phone comes back to this tab.
+if (ok(window.INLINE_DATA)) take(window.INLINE_DATA); else load();
 setInterval(load, 5*60*1000);
 document.addEventListener("visibilitychange", function(){ if (!document.hidden) load(); });
 window.addEventListener("hashchange", function(){ location.reload(); });
